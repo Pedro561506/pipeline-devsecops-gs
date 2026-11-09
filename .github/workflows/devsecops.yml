@@ -1,0 +1,250 @@
+name: Esteira DevSecOps - 8 etapas
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  gitleaks:
+    name: '01 - Gitleaks (secrets)'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detectar segredos
+        run: |
+          mkdir -p relatorios
+          docker run --rm -v "$PWD:/repo" -w /repo ghcr.io/gitleaks/gitleaks:latest \
+            git --config /repo/.gitleaks.toml --report-format json \
+            --report-path /repo/relatorios/gitleaks.json --exit-code 1 .
+      - name: Artefato Gitleaks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 01-gitleaks
+          path: relatorios/
+          if-no-files-found: warn
+
+  semgrep:
+    name: '02 - Semgrep (SAST)'
+    needs: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Executar regras customizadas
+        run: |
+          python -m pip install semgrep
+          mkdir -p relatorios
+          semgrep scan --config regras-banco --error --json \
+            --output relatorios/semgrep.json .
+      - name: Artefato Semgrep
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 02-semgrep
+          path: relatorios/
+          if-no-files-found: warn
+
+  build_test:
+    name: '03 - Build e testes'
+    needs: semgrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Instalar e testar
+        run: |
+          mkdir -p relatorios
+          python -m pip install -r requirements.txt
+          python -m compileall -q app.py config.py modulos tests
+          python -m unittest discover -s tests -v 2>&1 | tee relatorios/testes.txt
+          python -m pip check | tee relatorios/dependencias.txt
+          python -c 'from app import app; c=app.test_client(); r=c.get("/saude"); assert r.status_code == 200, r.status_code'
+      - name: Artefato testes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 03-testes
+          path: relatorios/
+          if-no-files-found: warn
+
+  trivy_sca:
+    name: '04 - Trivy SCA (HIGH/CRITICAL)'
+    needs: build_test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verificar dependencias
+        run: |
+          mkdir -p relatorios
+          docker run --rm -v "$PWD:/repo" aquasec/trivy:latest fs \
+            --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+            --format json --output /repo/relatorios/trivy-sca.json /repo
+      - name: Artefato Trivy SCA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 04-trivy-sca
+          path: relatorios/
+          if-no-files-found: warn
+
+  docker_ghcr:
+    name: '05 - Docker build + GHCR'
+    needs: trivy_sca
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Construir e enviar imagem
+        run: |
+          mkdir -p relatorios
+          IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_TAG=$IMAGE_LOWER:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          docker build -t "$IMAGE_LOWER:${GITHUB_SHA}" . 2>&1 | tee relatorios/docker-build.txt
+          docker push "$IMAGE_LOWER:${GITHUB_SHA}" 2>&1 | tee relatorios/docker-push.txt
+      - name: Artefato Docker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 05-docker
+          path: relatorios/
+          if-no-files-found: warn
+
+  trivy_image:
+    name: '06 - Trivy Image (HIGH/CRITICAL)'
+    needs: docker_ghcr
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Analisar imagem publicada
+        run: |
+          mkdir -p relatorios
+          IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          TAG="$IMAGE_LOWER:${GITHUB_SHA}"
+          docker pull "$TAG"
+          docker run --rm \
+            -v "$PWD/relatorios:/relatorios" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity HIGH,CRITICAL --exit-code 1 --format json \
+            --output /relatorios/trivy-image.json "$TAG"
+      - name: Artefato Trivy Image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 06-trivy-image
+          path: relatorios/
+          if-no-files-found: warn
+
+  zap:
+    name: '07 - Homologacao + OWASP ZAP'
+    needs: trivy_image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Subir aplicacao apenas em localhost
+        run: |
+          IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          TAG="$IMAGE_LOWER:${GITHUB_SHA}"
+          docker pull "$TAG"
+          docker run -d --name app-lab -p 127.0.0.1:5000:5000 \
+            -e FLASK_DEBUG=false -e SECRET_KEY="$(openssl rand -hex 32)" "$TAG"
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5000/saude >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker logs app-lab
+          exit 1
+      - name: Verificacao ZAP (WARN informativo)
+        run: |
+          mkdir -p relatorios
+          cp .zap/rules.tsv relatorios/rules.tsv
+          docker run --rm --network host \
+            -v "$PWD/relatorios:/zap/wrk:rw" \
+            -u 0 ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://127.0.0.1:5000 \
+            -c /zap/wrk/rules.tsv -r zap.html -J zap.json -I
+      - name: Logs da aplicacao
+        if: always()
+        run: |
+          mkdir -p relatorios
+          docker logs app-lab > relatorios/app.log 2>&1 || true
+      - name: Artefato ZAP
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 07-owasp-zap
+          path: relatorios/
+          if-no-files-found: warn
+
+  producao:
+    name: '08 - Aprovacao de producao'
+    needs: zap
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Registrar aprovacao (sem deploy externo)
+        run: |
+          mkdir -p relatorios
+          echo "Etapa 08 liberada pelo ambiente production em ${GITHUB_SHA}" | tee relatorios/aprovacao.txt
+      - name: Artefato producao
+        uses: actions/upload-artifact@v4
+        with:
+          name: 08-aprovacao
+          path: relatorios/
+
+  resumo:
+    name: 'Resumo da Esteira'
+    needs: [gitleaks, semgrep, build_test, trivy_sca, docker_ghcr, trivy_image, zap, producao]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gerar resumo das oito etapas
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo '## Resumo da Esteira DevSecOps' >> "$GITHUB_STEP_SUMMARY"
+          echo '| Job | Resultado |' >> "$GITHUB_STEP_SUMMARY"
+          echo '|---|---|' >> "$GITHUB_STEP_SUMMARY"
+          echo "$RESULTS" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "$RESULTS" | jq . > resumo-da-esteira.json
+      - name: Artefato resumo
+        uses: actions/upload-artifact@v4
+        with:
+          name: resumo-da-esteira
+          path: resumo-da-esteira.json

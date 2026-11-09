@@ -1,0 +1,20 @@
+title = "Configuracao do Gitleaks"
+
+[extend]
+# Usa como base o conjunto padrao de regras do Gitleaks (mantido pela comunidade)
+useDefault = true
+
+[allowlist]
+description = "Excecoes legitimas - avaliadas e documentadas"
+paths = [
+  '''.*_test\.go''',
+  '''.*/fixtures/.*''',
+  '''.*\.md$''',
+]
+
+# Exemplo de regra customizada para um padrao interno da organizacao
+[[rules]]
+id = "chave-interna-exemplo"
+description = "Chave de API interna (formato XX0000-xxxxxxxxxxxx)"
+regex = '''[A-Z]{2}[0-9]{4}-[A-Za-z0-9]{12}'''
+tags = ["key", "interno"]

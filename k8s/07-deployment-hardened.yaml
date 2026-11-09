@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: simulador-cartoes-sa
+  namespace: cartoes
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulador-cartoes
+  namespace: cartoes
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: simulador-cartoes
+  template:
+    metadata:
+      labels:
+        app: simulador-cartoes
+    spec:
+      serviceAccountName: simulador-cartoes-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: simulador-cartoes
+          image: ghcr.io/OWNER/pipeline-devsecops-gs:SUBSTITUIR_POR_SHA
+          ports:
+            - containerPort: 5000
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /saude
+              port: 5000
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /saude
+              port: 5000
+            initialDelaySeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: simulador-cartoes
+  namespace: cartoes
+spec:
+  selector:
+    app: simulador-cartoes
+  ports:
+    - port: 80
+      targetPort: 5000

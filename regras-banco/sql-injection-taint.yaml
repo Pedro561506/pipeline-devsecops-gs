@@ -1,0 +1,17 @@
+rules:
+  - id: sql-injection-dinamica
+    languages: [python]
+    severity: ERROR
+    message: >
+      SQL construído dinamicamente por interpolação ou concatenação.
+      Use placeholders na consulta e passe os parâmetros separadamente.
+    metadata:
+      categoria: injecao-sql
+      owasp: "A03:2021 Injection"
+      autor: laboratorio-semgrep
+    patterns:
+      - pattern-either:
+          - pattern: $CONN.execute(f"...")
+          - pattern: $CONN.execute("..." + $VAR)
+          - pattern: $CONN.execute($PREFIX + $VAR)
+          - pattern: $CONN.execute("..." % $VAR)

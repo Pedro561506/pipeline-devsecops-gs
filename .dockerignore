@@ -1,0 +1,13 @@
+.git
+.github
+__pycache__/
+*.pyc
+.env
+.env.*
+*.db
+k8s/
+regras-banco/
+relatorios/
+tests/
+README.md
+sonar-project.properties
