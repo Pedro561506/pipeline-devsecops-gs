@@ -115,13 +115,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+     
       - name: Construir e enviar imagem
+        shell: bash
         run: |
+          set -o pipefail
           mkdir -p relatorios
           IMAGE_LOWER=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE_TAG=$IMAGE_LOWER:${GITHUB_SHA}" >> "$GITHUB_ENV"
           docker build -t "$IMAGE_LOWER:${GITHUB_SHA}" . 2>&1 | tee relatorios/docker-build.txt
           docker push "$IMAGE_LOWER:${GITHUB_SHA}" 2>&1 | tee relatorios/docker-push.txt
+
       - name: Artefato Docker
         if: always()
         uses: actions/upload-artifact@v4
